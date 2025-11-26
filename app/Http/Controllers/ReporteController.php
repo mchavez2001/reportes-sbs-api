@@ -2,11 +2,12 @@
 
 namespace App\Http\Controllers;
 
+use Illuminate\Support\Facades\DB;
+
 use App\Models\Insurance_premium;
 use App\Models\Hierarchy;
 use App\Models\Section;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\DB;
 
 class ReporteController extends Controller
 {
