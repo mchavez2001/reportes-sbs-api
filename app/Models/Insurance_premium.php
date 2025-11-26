@@ -13,6 +13,26 @@ class Insurance_premium extends Model
 
     protected $fillable = [
         'id',
-        'name'
+        'year',
+        'value',
+        'usd',
+        'id_company',
+        'id_type',
+        'id_section',
     ];
+
+    public function company()
+    {
+        return $this->belongsTo(Company::class, 'id_company');
+    }
+
+    public function type()
+    {
+        return $this->belongsTo(Insurance_premiun_type::class, 'id_type');
+    }
+
+    public function section()
+    {
+        return $this->belongsTo(Section::class, 'id_section');
+    }
 }
