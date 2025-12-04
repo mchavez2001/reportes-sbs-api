@@ -2,18 +2,16 @@
 
 namespace App\Http\Controllers;
 
-use Illuminate\Support\Facades\DB;
-
 use App\Models\Insurance_premium;
 use App\Models\Hierarchy;
 use App\Models\Section;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 
 class ReporteController extends Controller
 {
     public function resumen(Request $request)
     {
-        // 1. Recepción de Parámetros
         $category = trim($request->query('category', ''));
         $subCategory = trim($request->query('subCategory', ''));
         $yearRange = explode(',', $request->query('yearRange', now()->year . ',' . now()->year));
@@ -29,14 +27,15 @@ class ReporteController extends Controller
 
         $filteredData = [];
 
-        // 2. Detección de condiciones
         $isNetPremium = stripos($type, 'Neta') !== false;
+        
         $complexCategories = [
             'Seguros de Vida',
             'Seguros del Sistema Privado de Pensiones',
             'Generales',
             'Accidentes y Enfermedades'
         ];
+
         $isComplexCategory = false;
         foreach ($complexCategories as $complex) {
             if (stripos($category, $complex) !== false) {
@@ -45,104 +44,94 @@ class ReporteController extends Controller
             }
         }
 
-        /**
-         * CASO 1: Sub-Categoría Específica (Ej: "Desgravamen")
-         * Prioridad Alta: Si el usuario pide un sub-ramo, filtramos SOLO por ese ID.
-         * Aplicamos la división /1000 para mantener la consistencia con los montos grandes de la BD.
-         */
-        if (!empty($subCategory) && $isNetPremium) {
-            
-            $subSection = Section::where('name', 'like', "%$subCategory%")->first();
-            // Si no encuentra la sección, usamos 0 para devolver vacío
-            $targetId = $subSection ? $subSection->id : 0; 
-            $columnToSum = $inUSD ? 'usd' : 'value';
-
-            $sql = "
-                SELECT 
-                    CAST(year AS UNSIGNED) AS year,
-                    CAST(month AS UNSIGNED) AS month,
-                    ROUND(SUM({$columnToSum}) / 1000, 2) AS value, 
-                    ROUND(SUM(usd), 2) AS usd
-                FROM insurance_premium
-                WHERE id_company = 21 
-                AND id_premium_type = 1
-                AND year BETWEEN ? AND ?
-                AND id_section = ?
-            ";
-
-            $params = [$startYear, $endYear, $targetId];
-
-            if (!empty($months)) {
-                $placeholders = implode(',', array_fill(0, count($months), '?'));
-                $sql .= " AND month IN ($placeholders)";
-                $params = array_merge($params, $months);
-            }
-
-            $sql .= " GROUP BY year, month ORDER BY year ASC, month ASC";
-            $filteredData = DB::select($sql, $params);
-
-        } 
-        /**
-         * CASO 2: Categoría Padre Compleja (Ej: "Seguros de Vida")
-         * Si no hay subcategoría, pero es un ramo complejo, sumamos TODOS sus hijos
-         * para evitar la duplicación del padre y aplicamos escala /1000.
-         */
-        elseif ($isComplexCategory && $isNetPremium) {
+        if ($isNetPremium && (!empty($subCategory) || $isComplexCategory)) {
             
             $columnToSum = $inUSD ? 'usd' : 'value';
+            $params = [];
+            $sqlWhere = "";
 
-            $sql = "
-                SELECT 
-                    CAST(T1.year AS UNSIGNED) AS year,
-                    CAST(T1.month AS UNSIGNED) AS month,
-                    ROUND(SUM(T1.{$columnToSum}) / 1000, 2) AS value, 
-                    ROUND(SUM(T1.usd), 2) AS usd
-                FROM insurance_premium T1
-                WHERE T1.id_company = 21 
-                AND T1.id_premium_type = 1
-                AND T1.year BETWEEN ? AND ?
-                AND T1.id_section IN (
+            if (!empty($subCategory)) {
+                $subSection = Section::where('name', 'like', "%$subCategory%")->first();
+                $targetId = $subSection ? $subSection->id : 0;
+                
+                $sqlWhere = "AND T1.id_section = ?";
+                $params = [$startYear, $endYear, $targetId];
+            } else {
+                $sqlWhere = "AND T1.id_section IN (
                     SELECT T2.id_child FROM hierarchy T2 
                     WHERE T2.id_parent IN (SELECT id FROM section WHERE name LIKE ?)
-                )
-            ";
-
-            $params = [$startYear, $endYear, "%$category%"];
-
-            if (!empty($months)) {
-                $placeholders = implode(',', array_fill(0, count($months), '?'));
-                $sql .= " AND T1.month IN ($placeholders)";
-                $params = array_merge($params, $months);
+                )";
+                $params = [$startYear, $endYear, "%$category%"];
             }
 
-            $sql .= " GROUP BY T1.year, T1.month ORDER BY T1.year ASC, T1.month ASC";
+            if ($byMonth) {
+                $sql = "
+                    SELECT 
+                        CAST(T1.year AS UNSIGNED) AS year,
+                        CAST(T1.month AS UNSIGNED) AS month,
+                        ROUND(SUM(T1.{$columnToSum}) / 1000, 2) AS value, 
+                        ROUND(SUM(T1.usd), 2) AS usd
+                    FROM insurance_premium T1
+                    WHERE T1.id_company = 21 
+                    AND T1.id_premium_type = 1
+                    AND T1.year BETWEEN ? AND ?
+                    $sqlWhere
+                ";
+
+                if (!empty($months)) {
+                    $placeholders = implode(',', array_fill(0, count($months), '?'));
+                    $sql .= " AND T1.month IN ($placeholders)";
+                    $params = array_merge($params, $months);
+                }
+
+                $sql .= " GROUP BY T1.year, T1.month ORDER BY T1.year ASC, T1.month ASC";
+            } else {
+                $sql = "
+                    SELECT 
+                        CAST(T1.year AS UNSIGNED) AS year,
+                        ROUND(SUM(T1.{$columnToSum}) / 1000, 2) AS value, 
+                        ROUND(SUM(T1.usd), 2) AS usd
+                    FROM insurance_premium T1
+                    WHERE T1.id_company = 21 
+                    AND T1.id_premium_type = 1
+                    AND T1.year BETWEEN ? AND ?
+                    $sqlWhere
+                ";
+
+                if (!empty($months)) {
+                    $placeholders = implode(',', array_fill(0, count($months), '?'));
+                    $sql .= " AND T1.month IN ($placeholders)";
+                    $params = array_merge($params, $months);
+                }
+
+                $sql .= " GROUP BY T1.year ORDER BY T1.year ASC";
+            }
+            
             $filteredData = DB::select($sql, $params);
 
-        } 
-        /**
-         * CASO 3: Lógica Estándar (Siniestralidad u otros casos)
-         */
-        else {
-            
+        } else {
             $query = Insurance_premium::where('id_company', 21)
                 ->whereBetween('year', [$startYear, $endYear]);
 
-            if ($isNetPremium) {
-                $query->where('id_premium_type', 1);
-            } elseif (stripos($type, 'Siniestro') !== false) {
+            if (stripos($type, 'Siniestro') !== false) {
                 $query->where('id_premium_type', 2);
+            } else {
+                $query->where('id_premium_type', 1);
             }
 
             $sectionIds = collect();
-            
-            if (!empty($subCategory)) {
-                $subSection = Section::where('name', 'like', "%$subCategory%")->first();
-                if ($subSection) $sectionIds = collect([$subSection->id]);
-            } elseif (!empty($category)) {
+            if (!empty($category)) {
                 $categorySection = Section::where('name', 'like', "%$category%")->first();
                 if ($categorySection) {
                     $childIds = Hierarchy::where('id_parent', $categorySection->id)->pluck('id_child');
-                    $sectionIds = $childIds->isNotEmpty() ? $childIds : collect([$categorySection->id]);
+                    $sectionIds->push($categorySection->id);
+                    $sectionIds = $sectionIds->merge($childIds);
+                }
+            }
+            if (!empty($subCategory)) {
+                $subSection = Section::where('name', 'like', "%$subCategory%")->first();
+                if ($subSection) {
+                    $sectionIds = collect([$subSection->id]);
                 }
             }
 
@@ -163,29 +152,58 @@ class ReporteController extends Controller
                         $valorNetas = $items->sum($colValue);
                         $valorSiniestros = $siniestros[$year][$month]->sum($colValue) ?? 0;
                         $ratio = $valorNetas > 0 ? ($valorSiniestros / $valorNetas) * 100 : 0;
-                        $processedData->push([
-                            'year' => (int)$year, 'month' => (int)$month,
-                            'value' => round($ratio, 2), 'usd' => 0
-                        ]);
+                        
+                        if ($byMonth) {
+                            $processedData->push([
+                                'year' => (int)$year,
+                                'month' => (int)$month,
+                                'value' => round($ratio, 2),
+                                'usd' => 0
+                            ]);
+                        } else {
+                            $processedData->push([
+                                'year' => (int)$year,
+                                'value' => round($ratio, 2),
+                                'usd' => 0
+                            ]);
+                        }
                     }
                 }
+                
                 $filteredData = $byMonth 
                     ? $processedData->sortBy([['year', 'asc'], ['month', 'asc']])->values()
-                    : $processedData->groupBy('year')->map(fn($items, $y) => ['year' => (int)$y, 'value' => round($items->avg('value'), 2), 'usd' => 0])->values();
+                    : $processedData->groupBy('year')->map(fn($items) => [
+                        'year' => $items->first()['year'],
+                        'value' => round($items->avg('value'), 2),
+                        'usd' => 0
+                    ])->values();
 
             } else {
                 $data = $query->select('year', 'month', 'value', 'usd')->get();
-                $mapFunc = function ($items, $y, $m = null) use ($colValue) {
-                    return ['year' => (int)$y, 'month' => $m ? (int)$m : null, 'value' => round($items->sum($colValue), 2), 'usd' => round($items->sum('usd'), 2)];
-                };
-                $filteredData = $byMonth 
-                    ? $data->groupBy(['year', 'month'])->map(fn($ms, $y) => collect($ms)->map(fn($is, $m) => $mapFunc($is, $y, $m))->values())->flatten(1)->sortBy([['year', 'asc'], ['month', 'asc']])->values()
-                    : $data->groupBy('year')->map(fn($is, $y) => $mapFunc($is, $y))->values();
+                
+                if ($byMonth) {
+                    $filteredData = $data->groupBy(['year', 'month'])->map(function ($monthsData, $year) use ($colValue) {
+                        return collect($monthsData)->map(function ($items, $month) use ($colValue, $year) {
+                            return [
+                                'year' => (int) $year,
+                                'month' => (int) $month,
+                                'value' => round($items->sum($colValue), 2),
+                                'usd' => round($items->sum('usd'), 2)
+                            ];
+                        })->values();
+                    })->flatten(1)->sortBy([['year', 'asc'], ['month', 'asc']])->values();
+                } else {
+                    $filteredData = $data->groupBy('year')->map(function ($items, $year) use ($colValue) {
+                        return [
+                            'year' => (int) $year,
+                            'value' => round($items->sum($colValue), 2),
+                            'usd' => round($items->sum('usd'), 2)
+                        ];
+                    })->values();
+                }
             }
         }
 
-        // 3. Indicadores y Categorías (Sin Cambios)
-        // ... (Mismo código de siempre para Cards laterales y menú) ...
         $netPremiums = Insurance_premium::where('id_company', 21)->where('id_premium_type', 1)->whereBetween('year', [$startYear, $endYear])->get();
         $sinisterPremiums = Insurance_premium::where('id_company', 21)->where('id_premium_type', 2)->whereBetween('year', [$startYear, $endYear])->get();
 
